@@ -344,32 +344,45 @@ end
 -- 6. DRAW PRIMITIVES  (all window-local: 0,0 = window top-left)
 ------------------------------------------------------------------------------
 
--- LIQUID GLASS panels: a real frosted blur of the scene behind, a translucent
--- dark tint on top, a soft outer rim and a bright top-edge sheen so every panel
--- reads like a pane of dark glass. Rounder corners via ROUND.
-local ROUND = 1.8
+-- APPLE-STYLE LIQUID GLASS panels, layered the way CSP allows:
+--   1) soft drop shadow  -> the panel floats above the scene
+--   2) frosted blur       -> the scene behind is blurred through the glass
+--   3) translucent tint   -> dark, but you still see the frosted scene
+--   4) top sheen wash      -> lighter over the upper half (curved light)
+--   5) rim + specular edge -> a crisp bright highlight along the top
+local ROUND = 2.0
 local function plate(p, sz, r, fill, glass)
   r = (r or 12) * ROUND
+
+  -- 1) drop shadow (depth)
+  ui.drawRectFilled(vec2(p.x-2, p.y+4), vec2(p.x+sz.x+2, p.y+sz.y+10), rgbm(0,0,0,0.32), r+2)
+
+  -- 2) frosted blur of whatever is behind the panel
   local blurred = false
   if canBlur then
     blurred = pcall(function()
       ui.beginBlurring()
       ui.drawRectFilled(p, p+sz, rgbm(1,1,1,1), r)
-      ui.endBlurring(1.0)               -- strong frost
+      ui.endBlurring(1.0)
     end)
   end
-  -- translucent dark tint (more see-through when the blur is available so the
-  -- frosted scene shows through = the liquid-glass feel)
-  local f = fill
-  if not f then
-    if glass then f = blurred and rgbm(0.035,0.04,0.055,0.52) or rgbm(0.05,0.055,0.07,0.84)
-    else       f = blurred and rgbm(0.04,0.045,0.06,0.62)  or C.plate end
+
+  -- 3) glass tint - see-through when frosted, more solid as a fallback
+  local base = fill
+  if not base then
+    if glass then base = blurred and rgbm(0.05,0.055,0.075,0.46) or rgbm(0.05,0.055,0.075,0.82)
+    else          base = blurred and rgbm(0.06,0.07,0.09,0.55)   or C.plate end
   end
-  ui.drawRectFilled(p, p+sz, f, r)
-  -- soft outer rim
-  ui.drawRect(p, p+sz, rgbm(1,1,1,0.10), r, 1.5)
-  -- bright sheen along the very top edge (the glassy highlight)
-  ui.drawLine(vec2(p.x + r*0.55, p.y + 1.5), vec2(p.x + sz.x - r*0.55, p.y + 1.5), rgbm(1,1,1,0.13), 1)
+  ui.drawRectFilled(p, p+sz, base, r)
+
+  -- 4) top sheen - a subtle lighter wash over the upper portion (glass curvature)
+  if not fill then
+    ui.drawRectFilled(p, vec2(p.x+sz.x, p.y + sz.y*0.5), rgbm(1,1,1,0.05), r)
+  end
+
+  -- 5) soft outer rim + a bright specular line along the very top edge
+  ui.drawRect(p, p+sz, rgbm(1,1,1,0.13), r, 1.5)
+  ui.drawLine(vec2(p.x + r*0.6, p.y + 2), vec2(p.x + sz.x - r*0.6, p.y + 2), rgbm(1,1,1,0.26), 1.5)
 end
 local function gradientBar(p, sz, stops, r)
   r = r or 8; local n = 56
