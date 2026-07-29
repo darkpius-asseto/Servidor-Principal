@@ -402,7 +402,9 @@ local function refreshGlass()
 end
 
 -- APPLE-STYLE LIQUID GLASS panels: real blur behind + tint + sheen + rim.
-local ROUND = 2.0
+-- ROUND = 1.0 -> panel corner radius equals the exact px used in the HTML mock
+-- (12 for rows, 18 for chat, etc.), so corners match the mock one-for-one.
+local ROUND = 1.0
 local function plate(p, sz, r, fill, glass)
   r = (r or 12) * ROUND
 
@@ -411,23 +413,18 @@ local function plate(p, sz, r, fill, glass)
 
   -- 2) real frosted blur: draw the blurred scene region that sits behind THIS
   --    rect (screen pos = curWinPos + p), mapped through the full-screen canvas.
+  -- Only draw the blurred scene if we can draw it with ROUNDED corners. A plain
+  -- square image would poke its corners out past the rounded glass and make the
+  -- whole panel look square-cornered, so if the rounded draw isn't available we
+  -- skip the image entirely and let the rounded dark glass carry the look.
   local blurred = false
-  if glassOK and glassOut then
+  if glassOK and glassOut and ui.drawImageRounded then
     blurred = pcall(function()
       local sx, sy = curWinPos.x + p.x, curWinPos.y + p.y
       local uv1 = vec2(sx / glassRes.x, sy / glassRes.y)
       local uv2 = vec2((sx + sz.x) / glassRes.x, (sy + sz.y) / glassRes.y)
       ui.drawImageRounded(glassOut, p, p + sz, uv1, uv2, rgbm(1,1,1,1), r)
     end)
-    if not blurred then
-      -- drawImageRounded may not exist; try plain drawImage (square corners)
-      blurred = pcall(function()
-        local sx, sy = curWinPos.x + p.x, curWinPos.y + p.y
-        local uv1 = vec2(sx / glassRes.x, sy / glassRes.y)
-        local uv2 = vec2((sx + sz.x) / glassRes.x, (sy + sz.y) / glassRes.y)
-        ui.drawImage(glassOut, p, p + sz, uv1, uv2)
-      end)
-    end
   end
 
   -- 3) glass tint - NEAR-BLACK over the blurred scene (dark like the reference,
@@ -437,14 +434,14 @@ local function plate(p, sz, r, fill, glass)
     -- DARK, mostly-solid glass so bright scenery behind (tunnel walls, lights)
     -- can't bleed through patchy. A hint of the frost still shows at these
     -- alphas, but the panel reads as clean dark glass like the mock.
-    if glass then base = rgbm(0.02,0.022,0.03,  blurred and 0.82 or 0.80)
-    else          base = rgbm(0.022,0.025,0.034, blurred and 0.86 or 0.84) end
+    if glass then base = rgbm(0.02,0.022,0.03,  blurred and 0.90 or 0.88)
+    else          base = rgbm(0.022,0.025,0.034, blurred and 0.92 or 0.90) end
   end
   ui.drawRectFilled(p, p+sz, base, r)
 
   -- 4) top sheen - a subtle lighter wash over the upper portion (glass curvature)
   if not fill then
-    ui.drawRectFilled(p, vec2(p.x+sz.x, p.y + sz.y*0.5), rgbm(1,1,1,0.05), r)
+    ui.drawRectFilled(p, vec2(p.x+sz.x, p.y + sz.y*0.5), rgbm(1,1,1,0.06), r)
   end
 
   -- 5) soft outer rim + a bright specular line along the very top edge
@@ -465,6 +462,13 @@ local function gradientBar(p, sz, stops, r)
     local rr = (i==0 or i==n-1) and r or 0
     ui.drawRectFilled(vec2(p.x+sz.x*t0, p.y), vec2(p.x+sz.x*t1+1, p.y+sz.y), col, rr)
   end
+end
+-- rounded green accent pill with a soft vertical gradient (light top -> dark),
+-- like the little green bars on the right of the PB / points panels in the mock
+local function greenBar(p, sz, r)
+  r = r or math.min(sz.x, sz.y)*0.45
+  ui.drawRectFilled(p, p+sz, C.greenA, r)                          -- darker base
+  ui.drawRectFilled(p, vec2(p.x+sz.x, p.y+sz.y*0.62), C.greenB, r) -- lighter top
 end
 local function chip(p, s, size, txtCol, bgCol)
   local w = TW(s, size) + 12
@@ -611,8 +615,8 @@ local function drawPB()
     local fillW = math.clamp(math.max(bw*into, lblW), 0, bw)
     gradientBar(vec2(bx,y2+8*s), vec2(fillW,30*s), {{0,C.greenA},{1,C.greenB}}, 8*s)
     T(vec2(bx+14*s,y2+15*s), 'Licenced '..lvl, 15*s, C.inkGreen, FONT_B)
-    -- bright green vertical accent bar hugging the right edge (from the pic)
-    gradientBar(vec2(p.x+W-20*s, y2+8*s), vec2(11*s, 30*s), {{0,C.greenA},{1,C.greenB}}, 5*s)
+    -- bright green vertical accent pill hugging the right edge (from the pic)
+    greenBar(vec2(p.x+W-20*s, y2+8*s), vec2(11*s, 30*s), 5*s)
 
     -- ROW 3 : sanctioned / next rank steppers -----------------------------
     local y3 = y2+h2+6*s; local h3 = 32*s
@@ -649,8 +653,8 @@ local function drawPoints()
     ui.drawRectFilled(vec2(p.x+286*s,p.y+7*s), vec2(p.x+374*s,p.y+41*s), rgbm(1,1,1,0.14), 9*s)
     ui.drawRect(vec2(p.x+286*s,p.y+7*s), vec2(p.x+374*s,p.y+41*s), rgbm(1,1,1,0.18), 9*s, 1)
     TC(vec2(p.x+286*s,p.y+13*s),88*s, string.format('%.1fX', totalMul), 18*s, C.white, FONT_X)
-    -- green side accent bar (matches the PB box + the pic)
-    gradientBar(vec2(p.x+W-14*s, p.y+9*s), vec2(9*s, 38*s), {{0,C.greenA},{1,C.greenB}}, 4*s)
+    -- green side accent pill (matches the PB box + the pic)
+    greenBar(vec2(p.x+W-14*s, p.y+9*s), vec2(9*s, 38*s), 4*s)
     -- LIVES: two little dots under the highlight box
     for i=0,1 do
       local lc = vec2(p.x+(306+i*24)*s, p.y+50*s)
@@ -1201,7 +1205,7 @@ function script.drawUI()
   local ok, err = pcall(function()
     drawGear()
     if S.showUI then
-      drawPB(); drawPoints(); drawNearby(); drawChat(); drawSpeedo(); drawStatus(); drawLeaderboard()
+      drawPB(); drawPoints(); drawNearby(); drawChat(); drawStatus(); drawLeaderboard()  -- speedo removed (new one later)
     end
     drawQuickActions(); drawPaintEditor()
     drawCrashFx()          -- full-screen red flash, drawn on top of everything
