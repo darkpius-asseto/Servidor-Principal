@@ -423,7 +423,9 @@ local function plate(p, sz, r, fill, glass)
       local sx, sy = curWinPos.x + p.x, curWinPos.y + p.y
       local uv1 = vec2(sx / glassRes.x, sy / glassRes.y)
       local uv2 = vec2((sx + sz.x) / glassRes.x, (sy + sz.y) / glassRes.y)
-      ui.drawImageRounded(glassOut, p, p + sz, uv1, uv2, rgbm(1,1,1,1), r)
+      -- draw the blur DARK (multiply down) so bright scenery behind a panel
+      -- can't wash it grey - stays dark with only a faint frost texture.
+      ui.drawImageRounded(glassOut, p, p + sz, uv1, uv2, rgbm(0.22,0.24,0.28,1), r)
     end)
   end
 
@@ -439,9 +441,12 @@ local function plate(p, sz, r, fill, glass)
   end
   ui.drawRectFilled(p, p+sz, base, r)
 
-  -- 4) top sheen - a subtle lighter wash over the upper portion (glass curvature)
+  -- 4) top sheen - a subtle lighter wash near the top edge (glass curvature).
+  --    Height is CAPPED so tall panels (the chat) don't get a big grayish top
+  --    half - they read as all-dark, while small panels still catch the sheen.
   if not fill then
-    ui.drawRectFilled(p, vec2(p.x+sz.x, p.y + sz.y*0.5), rgbm(1,1,1,0.06), r)
+    local wh = math.min(sz.y*0.5, 40)
+    ui.drawRectFilled(p, vec2(p.x+sz.x, p.y + wh), rgbm(1,1,1,0.06), r)
   end
 
   -- 5) soft outer rim + a bright specular line along the very top edge
@@ -463,13 +468,16 @@ local function gradientBar(p, sz, stops, r)
     ui.drawRectFilled(vec2(p.x+sz.x*t0, p.y), vec2(p.x+sz.x*t1+1, p.y+sz.y), col, rr)
   end
 end
--- rounded green accent pill with a soft vertical gradient (light top -> dark),
--- like the little green bars on the right of the PB / points panels in the mock
-local function greenBar(p, sz, r)
-  r = r or math.min(sz.x, sz.y)*0.45
-  ui.drawRectFilled(p, p+sz, C.greenA, r)                          -- darker base
-  ui.drawRectFilled(p, vec2(p.x+sz.x, p.y+sz.y*0.62), C.greenB, r) -- lighter top
+-- rounded pill with a soft vertical gradient (light top -> darker bottom).
+-- Both the green accent bars AND the purple PTS fill use this so every filled
+-- bar has the SAME rounded corners as the panel it sits in (no sharp corners).
+local function pill(p, sz, colTop, colBot, r)
+  r = r or math.min(sz.x, sz.y)*0.5
+  r = math.min(r, sz.x*0.5, sz.y*0.5)                              -- never over-round
+  ui.drawRectFilled(p, p+sz, colBot, r)                           -- darker base
+  ui.drawRectFilled(p, vec2(p.x+sz.x, p.y+sz.y*0.62), colTop, r)  -- lighter top
 end
+local function greenBar(p, sz, r) pill(p, sz, C.greenB, C.greenA, r) end
 local function chip(p, s, size, txtCol, bgCol)
   local w = TW(s, size) + 12
   ui.drawRectFilled(p, p+vec2(w, size+7), bgCol or C.chip, 5)
@@ -613,7 +621,7 @@ local function drawPB()
     -- always keep enough green behind the label so dark text stays readable
     local lblW = TW('Licenced '..lvl, 15*s) + 28*s
     local fillW = math.clamp(math.max(bw*into, lblW), 0, bw)
-    gradientBar(vec2(bx,y2+8*s), vec2(fillW,30*s), {{0,C.greenA},{1,C.greenB}}, 8*s)
+    greenBar(vec2(bx,y2+8*s), vec2(fillW,30*s), 8*s)   -- rounded green fill
     T(vec2(bx+14*s,y2+15*s), 'Licenced '..lvl, 15*s, C.inkGreen, FONT_B)
     -- bright green vertical accent pill hugging the right edge (from the pic)
     greenBar(vec2(p.x+W-20*s, y2+8*s), vec2(11*s, 30*s), 5*s)
@@ -671,8 +679,8 @@ local function drawPoints()
     local ih  = bh - ins*2
     local fill = math.clamp(me.session/math.max(me.pb,1), 0.04, 1)
     local fw = math.max((bw-ins*2)*fill, ih)   -- keep a full pill even when tiny
-    -- purple gradient fill (pink->violet like the reference)
-    gradientBar(vec2(bx+ins,by+ins), vec2(fw, ih), {{0,C.ptsA},{1,C.ptsB}}, ih/2)
+    -- purple fill: rounded pill, SAME corner radius as the white pill it sits in
+    pill(vec2(bx+ins,by+ins), vec2(fw, ih), C.ptsB, C.ptsA, ih/2)
     TC(vec2(bx,by+10*s), bw, comma(me.session)..' PTS', 20*s, C.ink, FONT_X)
   end)
 end
