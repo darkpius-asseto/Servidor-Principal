@@ -121,22 +121,20 @@ local chatLines, chatDraft, chatWhisper = {}, '', false
 -- No Hesi UI 2.0 style scoring: points come from CUTS (near-misses), a combo
 -- multiplier that decays if you stop cutting, and a 2-lives crash system.
 local prevKmh          = 0
-local cutCooldowns     = {}    -- carIndex -> time until it can score another cut
 local crashCooldownEnd = 0     -- can't register another crash until this time
 local speedoFlashEnd   = 0     -- speedo flashes red until this time
 local vignetteStart, vignetteEnd = -10, -10   -- full-screen red flash timing
 local diagLogged = false
 
 local PROX_RANGE, PROX_CLOSE = 32, 8
--- CUT scoring tuning
-local CUT_SPEED    = 80        -- min km/h to score a near-miss cut
-local CUT_DIST     = 3.0       -- metres: pass this close = a cut
-local CUT_POINTS   = 10000     -- base points per cut (x combo)
-local CUT_COOLDOWN = 2.0       -- seconds before the SAME car can score again
-local COMBO_STEP   = 0.5       -- combo gained per cut
-local COMBO_MAX    = 25        -- combo cap
-local COMBO_TIME   = 5.0       -- seconds a combo lasts after your last cut
--- crash tuning
+-- CONTINUOUS proximity scoring: points keep climbing while you cruise fast
+-- through traffic. Combo builds over time and decays when you stop.
+local MIN_CRUISE  = 80         -- km/h: below this you earn nothing
+local BASE_RATE   = 9000       -- points-per-second scale at combo 1
+local COMBO_MAX   = 12         -- seconds of sustained scoring for max combo
+local COMBO_GAIN  = 0.5        -- combo added per second scored
+local COMBO_DECAY = 2.5        -- combo timer lost per second when not scoring
+-- crash tuning (2 lives)
 local CRASH_DROP     = 40      -- km/h dropped in one frame = a crash
 local CRASH_COOLDOWN = 2.0     -- seconds of immunity after a crash
 
@@ -245,24 +243,15 @@ end
 -- 5. SCORING
 ------------------------------------------------------------------------------
 
--- register a single cut (near-miss): add points, grow combo, refresh timer
-local function registerCut()
-  me.combo = math.min(me.combo + COMBO_STEP, COMBO_MAX)
-  me.comboT = COMBO_TIME
-  me.session = me.session + CUT_POINTS * me.combo
-  if me.session > me.pb then me.pb = me.session; S.pbScore = math.floor(me.pb) end
-  S.rankPts = (S.rankPts or 0) + CUT_POINTS * me.combo * 0.01   -- licence bar progress
-end
-
 local function updateScoring(dt)
   local sim = ac.getSim and ac.getSim() or nil
   local my  = ac.getCar and ac.getCar(0) or nil
   if not sim or not my then return end
   me.kmh = my.speedKmh or 0
 
-  -- ---- scan cars: build the Nearby list AND detect CUTS (near-misses) --------
+  -- ---- scan cars: build the Nearby list AND accumulate proximity gain --------
   nearby = {}
-  local closest, humanCount, rawNear = 1e9, 0, 0
+  local gained, closest, humanCount, rawNear = 0, 1e9, 0, 0
   local count = sim.carsCount or 0
   for i = 1, count - 1 do
     local c = ac.getCar(i)
@@ -273,13 +262,8 @@ local function updateScoring(dt)
       local atOrigin = pos and math.abs(pos.x) < 1 and math.abs(pos.z) < 1
       if d < PROX_RANGE and d > 0.3 and not atOrigin then
         rawNear = rawNear + 1
+        gained = gained + (1 - d / PROX_RANGE)     -- closer = more, off ANY car
         if d < closest then closest = d end
-
-        -- CUT: fast + very close + this car isn't on cooldown
-        if me.kmh > CUT_SPEED and d < CUT_DIST and (cutCooldowns[i] or 0) < now then
-          cutCooldowns[i] = now + CUT_COOLDOWN
-          registerCut()
-        end
 
         -- Nearby Drivers list: real HUMAN players only, AI hidden
         local aiFlag = cf('isAIControlled') == true
@@ -300,16 +284,27 @@ local function updateScoring(dt)
   me.nearby = humanCount
   me.rawNear = rawNear
 
-  -- ---- combo timer: decays if you stop cutting; empties -> combo resets ------
-  if me.comboT > 0 then
-    me.comboT = math.max(me.comboT - dt, 0)
-    if me.comboT <= 0 then me.combo = 1 end
-  end
+  -- must be CRUISING to score (no farming while parked); reward higher speed
+  if me.kmh < MIN_CRUISE then gained = 0 end
+  gained = gained * math.clamp(me.kmh / 60, 0, 4)
+  me.gainRate = gained
 
-  -- display-only multipliers
+  -- display multipliers
   me.speedMul = 1 + math.clamp(me.kmh/50, 0, 20)
   me.proxMul  = 1 + (closest < 1e8 and (1 - math.clamp(closest/PROX_RANGE, 0, 1)) * 4 or 0)
                   + (closest < PROX_CLOSE and 2 or 0)
+
+  -- combo builds over time while scoring, decays when you stop
+  if gained > 0 and me.kmh > 15 then me.comboT = math.min(me.comboT + dt, COMBO_MAX)
+  else me.comboT = math.max(me.comboT - dt*COMBO_DECAY, 0) end
+  me.combo = 1 + me.comboT*COMBO_GAIN
+
+  -- award points continuously (Combo x Prox stacked in)
+  if gained > 0 then
+    me.session = me.session + gained * dt * BASE_RATE * me.combo * me.proxMul
+    if me.session > me.pb then me.pb = me.session; S.pbScore = math.floor(me.pb) end
+    S.rankPts = (S.rankPts or 0) + gained * dt * BASE_RATE * 0.02
+  end
 
   -- ---- CRASH: sudden hard deceleration -> lose a life ------------------------
   local drop = prevKmh - me.kmh
@@ -337,7 +332,6 @@ local function updateScoring(dt)
 
   broadcastScore()
   for k,v in pairs(remote) do if now - v.t > 8 then remote[k] = nil end end
-  for k,t in pairs(cutCooldowns) do if t < now then cutCooldowns[k] = nil end end
 end
 
 local RANK_STEP = 5e6
@@ -926,16 +920,22 @@ local function drawCrashFx()
   local sw = screenSize()
   local a = math.clamp((vignetteEnd - now) / 1.5, 0, 1)   -- 1 -> 0 over 1.5s
   ui.transparentWindow('drkz_vignette', vec2(0,0), sw, true, false, function()
-    -- full-screen red flash fading out
-    ui.drawRectFilled(vec2(0,0), sw, rgbm(0.85, 0.0, 0.0, 0.5*a), 0)
-    -- heavier red at the edges for a vignette feel
-    local edge = math.min(sw.x, sw.y) * 0.22
-    ui.drawRectFilled(vec2(0,0), vec2(sw.x, edge), rgbm(0.6,0,0,0.4*a), 0)
-    ui.drawRectFilled(vec2(0,sw.y-edge), sw, rgbm(0.6,0,0,0.4*a), 0)
-    ui.drawRectFilled(vec2(0,0), vec2(edge, sw.y), rgbm(0.6,0,0,0.4*a), 0)
-    ui.drawRectFilled(vec2(sw.x-edge,0), sw, rgbm(0.6,0,0,0.4*a), 0)
-    if a > 0.4 then
-      TC(vec2(0, sw.y*0.42), sw.x, 'RUN OVER', 56, rgbm(1,1,1, a), FONT_X)
+    -- ONLY a soft red glow in the corners (no full-screen fill, no text).
+    -- Each corner is built from a few nested, fading rectangles.
+    local cs = math.min(sw.x, sw.y) * 0.16      -- corner reach
+    local steps = 5
+    for i = 1, steps do
+      local f = i / steps                        -- 0..1 outward
+      local col = rgbm(0.85, 0.0, 0.0, 0.10 * a * f)
+      local s = cs * f
+      -- top-left
+      ui.drawRectFilled(vec2(0,0), vec2(s, s), col, 0)
+      -- top-right
+      ui.drawRectFilled(vec2(sw.x - s, 0), vec2(sw.x, s), col, 0)
+      -- bottom-left
+      ui.drawRectFilled(vec2(0, sw.y - s), vec2(s, sw.y), col, 0)
+      -- bottom-right
+      ui.drawRectFilled(vec2(sw.x - s, sw.y - s), sw, col, 0)
     end
   end)
 end
