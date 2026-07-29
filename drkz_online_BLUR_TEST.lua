@@ -89,6 +89,11 @@ local C = {
   purpA = hex('9B1FE8'), purpB = hex('C93CF0'), purpC = hex('E88CF5'),
   pink = hex('FF45A8'), purple = hex('B45CFF'), orange = hex('F0641E'), off = hex('3A3D46'),
   nPurple = hex('B45CFF'), whisper = hex('5AA8F0'), sys = hex('22D94E'),
+  -- speedo twin arcs (pink = rpm/gear, purple = speed) + points pill gradient
+  arcPinkA=hex('FF2E88'), arcPinkB=hex('FF9AD0'), arcPurpA=hex('7C3AED'), arcPurpB=hex('C77DFF'),
+  ptsA=hex('7C1FE0'), ptsB=hex('C93CF0'),
+  -- chat tier badge colours
+  tier1=hex('7FB2FF'), tier2=hex('9B87FF'), tier3=hex('FFB13D'), owner=hex('3FD35C'),
 }
 
 ------------------------------------------------------------------------------
@@ -121,6 +126,7 @@ local chatLines, chatDraft, chatWhisper = {}, '', false
 -- No Hesi UI 2.0 style scoring: points come from CUTS (near-misses), a combo
 -- multiplier that decays if you stop cutting, and a 2-lives crash system.
 local prevKmh          = 0
+local runStartT        = -1    -- wall time (script `now`) the current run began
 local crashCooldownEnd = 0     -- can't register another crash until this time
 local speedoFlashEnd   = 0     -- speedo flashes red until this time
 local vignetteStart, vignetteEnd = -10, -10   -- full-screen red flash timing
@@ -178,8 +184,14 @@ local function broadcastScore()
   pcall(function() scoreEvt{ score = math.floor(math.max(me.session, me.pb)), combo = me.combo } end)
 end
 
+-- give each speaker a stable pseudo "tier" (1..3) just for the badge flavour,
+-- derived from the name so the same person always shows the same tier.
+local function nameTier(who)
+  local h = 0; for i=1,#who do h = (h*31 + who:byte(i)) % 997 end
+  return 1 + (h % 3)
+end
 local function pushChat(who, text, kind)
-  chatLines[#chatLines+1] = { who=who, text=text, kind=kind or 'user', t=now }
+  chatLines[#chatLines+1] = { who=who, text=text, kind=kind or 'user', t=now, clock=clockNow(), tier=nameTier(who) }
   while #chatLines > 40 do table.remove(chatLines, 1) end
 end
 
@@ -248,6 +260,8 @@ local function updateScoring(dt)
   local my  = ac.getCar and ac.getCar(0) or nil
   if not sim or not my then return end
   me.kmh = my.speedKmh or 0
+  if runStartT < 0 then runStartT = now end
+  me.runTime = now - runStartT
 
   -- ---- scan cars: build the Nearby list AND accumulate proximity gain --------
   nearby = {}
@@ -325,6 +339,7 @@ local function updateScoring(dt)
       me.session = 0
       me.combo, me.comboT = 1, 0
       me.lives = 2
+      runStartT = now                               -- restart the run timer
       vignetteStart, vignetteEnd = now, now + 1.5   -- full-screen red flash
     end
   end
@@ -459,6 +474,19 @@ local function arc(c, r, frac, col, th)
   ui.pathClear(); ui.pathArcTo(c, r, a0, a0+span, 48); ui.pathStroke(rgbm(1,1,1,0.06), false, th)
   if frac > 0.001 then ui.pathClear(); ui.pathArcTo(c, r, a0, a0+span*math.clamp(frac,0,1), 48); ui.pathStroke(col, false, th) end
 end
+-- gradient arc: sweeps a0->a1, colour blends colA->colB along the sweep
+local function gradArc(c, r, a0, a1, colA, colB, th, segs)
+  segs = segs or 40
+  for i = 0, segs-1 do
+    local f0, f1 = i/segs, (i+1)/segs; local f = (f0+f1)*0.5
+    local col = rgbm(math.lerp(colA.r,colB.r,f), math.lerp(colA.g,colB.g,f), math.lerp(colA.b,colB.b,f), math.lerp(colA.mult,colB.mult,f))
+    ui.pathClear(); ui.pathArcTo(c, r, a0+(a1-a0)*f0, a0+(a1-a0)*f1, 6); ui.pathStroke(col, false, th)
+  end
+end
+-- mm:ss from seconds
+local function mmss(t) t = math.max(t or 0,0); return string.format('%d:%02d', math.floor(t/60), math.floor(t%60)) end
+-- wall clock like "01:01 PM" (guarded; empty string if os.date is unavailable)
+local function clockNow() local ok,d = pcall(function() return os.date('%I:%M %p') end); return (ok and d) and tostring(d) or '' end
 local function glyph(kind, c, r, col)
   if kind=='jacket' then
     ui.drawRectFilled(vec2(c.x-r*0.6,c.y-r*0.7), vec2(c.x+r*0.6,c.y+r*0.7), col, 3)
@@ -549,22 +577,33 @@ end
 local function drawPB()
   panel('pb', 'pb', 330, 142, function(p, s)
     local lvl, into = rankInfo()
+    local W = 330*s
+
+    -- ROW 1 : PB | big number | rank ---------------------------------------
     local h1 = 46*s
-    plate(p, vec2(330*s, h1), 12*s)
-    T(vec2(p.x+16*s,p.y+9*s),'PB',13*s,C.white,FONT_B)
-    T(vec2(p.x+16*s,p.y+25*s),'SOLO',9*s,C.muted)
-    T(vec2(p.x+52*s,p.y+11*s), comma(me.pb), 23*s, C.white, FONT_X)
+    plate(p, vec2(W, h1), 12*s)
+    -- little dark segment behind the "PB / SOLO" label (like the pic)
+    ui.drawRectFilled(vec2(p.x+7*s,p.y+7*s), vec2(p.x+46*s,p.y+39*s), rgbm(1,1,1,0.05), 8*s)
+    T(vec2(p.x+14*s,p.y+9*s),'PB',13*s,C.white,FONT_B)
+    T(vec2(p.x+14*s,p.y+25*s),'SOLO',8*s,C.muted)
+    T(vec2(p.x+58*s,p.y+11*s), comma(me.pb), 22*s, C.white, FONT_X)
     TR(vec2(p.x,p.y+16*s), 314*s, '#2,203', 13*s, C.muted)
+
+    -- ROW 2 : controller icon | license bar | green side accent -----------
     local y2 = p.y+h1+6*s; local h2 = 46*s
-    plate(vec2(p.x,y2), vec2(330*s,h2), 12*s)
+    plate(vec2(p.x,y2), vec2(W,h2), 12*s)
     ui.drawRectFilled(vec2(p.x+7*s,y2+7*s), vec2(p.x+41*s,y2+39*s), C.greenBg, 8*s)
     glyph('jacket', vec2(p.x+24*s,y2+23*s), 10*s, C.greenIco)
-    local bx, bw = p.x+50*s, 273*s
+    local bx, bw = p.x+50*s, 258*s
     ui.drawRectFilled(vec2(bx,y2+8*s), vec2(bx+bw,y2+38*s), C.slot, 8*s)
-    gradientBar(vec2(bx,y2+8*s), vec2(bw*math.max(into,0.04),30*s), {{0,C.greenA},{1,C.greenB}}, 8*s)
+    gradientBar(vec2(bx,y2+8*s), vec2(bw*math.max(into,0.06),30*s), {{0,C.greenA},{1,C.greenB}}, 8*s)
     T(vec2(bx+14*s,y2+15*s), 'Licenced '..lvl, 15*s, C.inkGreen, FONT_B)
+    -- bright green vertical accent bar hugging the right edge (from the pic)
+    gradientBar(vec2(p.x+W-20*s, y2+8*s), vec2(11*s, 30*s), {{0,C.greenA},{1,C.greenB}}, 5*s)
+
+    -- ROW 3 : sanctioned / next rank steppers -----------------------------
     local y3 = y2+h2+6*s; local h3 = 32*s
-    plate(vec2(p.x,y3), vec2(330*s,h3), 10*s)
+    plate(vec2(p.x,y3), vec2(W,h3), 10*s)
     T(vec2(p.x+14*s,y3+9*s),'Sanctioned',12*s,C.muted)
     TR(vec2(p.x,y3+9*s), 250*s, 'Next Rank', 12*s, C.muted)
     local function dot(cx,n) ui.drawCircleFilled(vec2(cx,y3+16*s),9*s,hex('2B2F38'),16); TC(vec2(cx-9*s,y3+10*s),18*s,n,10*s,hex('E8E8EE'),FONT_B) end
@@ -578,31 +617,45 @@ end
 
 local function drawPoints()
   panel('pts', 'pts', 424, 122, function(p, s)
+    local W = 410*s
+    local totalMul = me.combo * me.proxMul       -- the highlighted "aggro" number
+
+    -- ROW 1 : four stat cells (Combo / Speed / Timer / highlighted total) --
     local h1 = 56*s
-    plate(p, vec2(390*s,h1), 12*s)
-    local function stat(x,w,big,small,col) TC(vec2(p.x+x,p.y+10*s),w,big,19*s,col or C.white,FONT_X); TC(vec2(p.x+x,p.y+34*s),w,small,11*s,C.muted) end
-    stat(8*s,92*s, string.format('%.1fX',me.combo),'Combo')
-    stat(100*s,92*s, string.format('%.1fX',me.speedMul),'Speed',C.white)
-    stat(192*s,92*s, string.format('%.1fX',me.proxMul),'Prox')
-    -- top-right block: total multiplier + the 2 life dots
-    ui.drawRectFilled(vec2(p.x+292*s,p.y+8*s), vec2(p.x+382*s,p.y+40*s), C.grayBox, 9*s)
-    TC(vec2(p.x+292*s,p.y+13*s),90*s, string.format('%.1fX', me.combo), 16*s, C.white, FONT_X)
-    -- LIVES: two dots (filled = life remaining, dim = lost)
+    plate(p, vec2(W,h1), 12*s)
+    local function stat(x,w,big,small,col)
+      TC(vec2(p.x+x,p.y+9*s),w,big,19*s,col or C.white,FONT_X)
+      TC(vec2(p.x+x,p.y+34*s),w,small,11*s,C.muted)
+    end
+    stat(6*s, 88*s, string.format('%.1fX',me.combo),   'Combo')
+    stat(96*s,88*s, string.format('%.1fX',me.speedMul),'Speed')
+    stat(188*s,88*s, mmss(me.runTime),                 'Timer')
+    -- thin dividers between the cells
+    for _,dx in ipairs({94,186,278}) do ui.drawLine(vec2(p.x+dx*s,p.y+12*s), vec2(p.x+dx*s,p.y+44*s), rgbm(1,1,1,0.06), 1) end
+    -- highlighted total-multiplier box (lighter, like the pic's "2.5X")
+    ui.drawRectFilled(vec2(p.x+286*s,p.y+7*s), vec2(p.x+374*s,p.y+41*s), rgbm(1,1,1,0.14), 9*s)
+    ui.drawRect(vec2(p.x+286*s,p.y+7*s), vec2(p.x+374*s,p.y+41*s), rgbm(1,1,1,0.18), 9*s, 1)
+    TC(vec2(p.x+286*s,p.y+13*s),88*s, string.format('%.1fX', totalMul), 18*s, C.white, FONT_X)
+    -- green side accent bar (matches the PB box + the pic)
+    gradientBar(vec2(p.x+W-14*s, p.y+9*s), vec2(9*s, 38*s), {{0,C.greenA},{1,C.greenB}}, 4*s)
+    -- LIVES: two little dots under the highlight box
     for i=0,1 do
-      local lc = vec2(p.x+(312+i*24)*s, p.y+48*s)
-      ui.drawCircleFilled(lc, 5*s, i < me.lives and C.hp or rgbm(0.30,0.10,0.10,0.9), 14)
-      ui.drawCircle(lc, 5*s, rgbm(1,1,1,0.15), 14, 1)
+      local lc = vec2(p.x+(306+i*24)*s, p.y+50*s)
+      ui.drawCircleFilled(lc, 4.5*s, i < me.lives and C.hp or rgbm(0.30,0.10,0.10,0.9), 14)
+      ui.drawCircle(lc, 4.5*s, rgbm(1,1,1,0.15), 14, 1)
     end
 
+    -- ROW 2 : the big purple PTS pill -------------------------------------
     local y2 = p.y+h1+8*s
-    plate(vec2(p.x,y2), vec2(390*s,54*s), 12*s)
-    local bx,by,bw,bh = p.x+7*s, y2+7*s, 376*s, 40*s
+    plate(vec2(p.x,y2), vec2(W,54*s), 12*s)
+    local bx,by,bw,bh = p.x+7*s, y2+7*s, W-14*s, 40*s
     ui.drawRectFilled(vec2(bx,by), vec2(bx+bw,by+bh), C.barWhite, bh/2)
     local ins = 3*s
     local ih  = bh - ins*2
     local fill = math.clamp(me.session/math.max(me.pb,1), 0.04, 1)
     local fw = math.max((bw-ins*2)*fill, ih)   -- keep a full pill even when tiny
-    ui.drawRectFilled(vec2(bx+ins,by+ins), vec2(bx+ins+fw, by+ins+ih), C.purpB, ih/2)
+    -- purple gradient fill (pink->violet like the reference)
+    gradientBar(vec2(bx+ins,by+ins), vec2(fw, ih), {{0,C.ptsA},{1,C.ptsB}}, ih/2)
     TC(vec2(bx,by+10*s), bw, comma(me.session)..' PTS', 20*s, C.ink, FONT_X)
   end)
 end
@@ -653,45 +706,95 @@ end
 -- 11. CHAT
 ------------------------------------------------------------------------------
 
+-- little inline icons for the chat input bar
+local function iconSmiley(c, r, col)
+  ui.drawCircle(c, r, col, 20, 1.6)
+  ui.drawCircleFilled(vec2(c.x-r*0.35,c.y-r*0.15), r*0.14, col, 8)
+  ui.drawCircleFilled(vec2(c.x+r*0.35,c.y-r*0.15), r*0.14, col, 8)
+  ui.pathClear(); ui.pathArcTo(vec2(c.x,c.y-r*0.05), r*0.55, math.rad(25), math.rad(155), 16); ui.pathStroke(col, false, 1.5)
+end
+local function iconPeople(c, r, col)
+  ui.drawCircleFilled(vec2(c.x-r*0.4,c.y-r*0.2), r*0.42, col, 12)
+  ui.drawCircleFilled(vec2(c.x+r*0.4,c.y-r*0.2), r*0.42, col, 12)
+  ui.pathClear(); ui.pathArcTo(vec2(c.x-r*0.4,c.y+r*0.9), r*0.7, math.rad(200), math.rad(340), 12); ui.pathStroke(col, false, 1.6)
+  ui.pathClear(); ui.pathArcTo(vec2(c.x+r*0.4,c.y+r*0.9), r*0.7, math.rad(200), math.rad(340), 12); ui.pathStroke(col, false, 1.6)
+end
+
 local function drawChat()
   if not S.showChat then return end
   panel('chat', 'chat', 470, 590, function(p, s)
-    plate(p, vec2(470*s,590*s), 18*s)   -- same clean dark glass as the rest of the HUD
-    T(vec2(p.x+16*s,p.y+14*s),'Chat',15*s,hex('D6D6DC'))
-    glyph('gear', vec2(p.x+390*s,p.y+22*s),7*s,C.muted)
-    ui.drawLine(vec2(p.x+414*s,p.y+22*s), vec2(p.x+426*s,p.y+22*s), C.muted, 1.6)
-    glyph('x', vec2(p.x+446*s,p.y+22*s),7*s,C.muted)
-    if clicked(vec2(p.x+436*s,p.y+10*s), vec2(24*s,24*s)) then S.showChat = false end
-    local top, bottom, lineH = p.y+44*s, p.y+484*s, 40*s
-    local maxLines = math.max(1, math.floor((bottom-top)/lineH))
+    local W = 470*s
+    plate(p, vec2(W,590*s), 18*s)   -- same clean dark glass as the rest of the HUD
+
+    -- HEADER : title + settings / minimize / close -------------------------
+    T(vec2(p.x+18*s,p.y+15*s),'Chat',15*s,C.white,FONT_B)
+    glyph('gear', vec2(p.x+W-84*s,p.y+23*s),7*s,C.muted)
+    ui.drawLine(vec2(p.x+W-58*s,p.y+23*s), vec2(p.x+W-46*s,p.y+23*s), C.muted, 1.8)   -- minimize
+    glyph('x', vec2(p.x+W-24*s,p.y+23*s),7*s,C.muted)
+    ui.drawLine(vec2(p.x+14*s,p.y+40*s), vec2(p.x+W-14*s,p.y+40*s), rgbm(1,1,1,0.06), 1)
+    if clicked(vec2(p.x+W-36*s,p.y+10*s), vec2(28*s,26*s)) then S.showChat = false end
+
+    -- tier badge next to a name; returns its width
+    local function tierChip(x, y, m)
+      local label, col
+      if m.kind=='sys'    then label,col = 'Owner', C.owner
+      elseif m.kind=='me' then label,col = 'You',   C.pink
+      else label,col = 'Tier '..(m.tier or 2), (m.tier==3 and C.tier3 or (m.tier==1 and C.tier1 or C.tier2)) end
+      local w = TW(label,10*s)+14*s
+      ui.drawRectFilled(vec2(x,y), vec2(x+w,y+16*s), rgbm(col.r,col.g,col.b,0.16), 5*s)
+      ui.drawRect(vec2(x,y), vec2(x+w,y+16*s), rgbm(col.r,col.g,col.b,0.30), 5*s, 1)
+      T(vec2(x+7*s,y+2*s), label, 10*s, col, FONT_B)
+      return w+6*s
+    end
+
+    -- MESSAGES : avatar + name + tier + timestamp + text -------------------
+    local top, bottom, rowH = p.y+50*s, p.y+484*s, 46*s
+    local maxLines = math.max(1, math.floor((bottom-top)/rowH))
     local startIdx = math.max(1, #chatLines - maxLines + 1)
     local y = top
     for i = startIdx, #chatLines do
       local m = chatLines[i]
-      local nameCol = C.soft
-      if m.kind=='sys' then nameCol=C.sys elseif m.kind=='me' then nameCol=C.pink elseif m.kind=='whisper' then nameCol=C.nPurple end
-      avatar(vec2(p.x+30*s,y+12*s), 13*s, m.kind=='sys' and hex('2B3A2F') or hex('4A5568'))
-      T(vec2(p.x+52*s,y), m.who, 13*s, nameCol, FONT_B)
-      T(vec2(p.x+52*s,y+17*s), m.text, 12*s, (m.kind=='sys') and C.muted or C.soft)
-      y = y + lineH
+      local avCol = m.kind=='sys' and hex('2B3A2F') or (m.kind=='me' and hex('5A2B44') or hex('3A4657'))
+      avatar(vec2(p.x+32*s,y+14*s), 14*s, avCol)
+      local nx = p.x+56*s
+      T(vec2(nx,y), m.who, 13*s, C.white, FONT_B)
+      nx = nx + TW(m.who,13*s) + 8*s
+      nx = nx + tierChip(nx, y+1*s, m)
+      if m.clock ~= '' then TR(vec2(p.x,y+1*s), W-16*s, m.clock, 10*s, C.faint) end
+      local txt = m.text
+      if TW(txt,12*s) > W-72*s then                    -- clip very long lines
+        while #txt > 4 and TW(txt..'...',12*s) > W-72*s do txt = txt:sub(1,#txt-1) end
+        txt = txt..'...'
+      end
+      T(vec2(p.x+56*s,y+19*s), txt, 12*s, (m.kind=='sys') and C.muted or C.soft)
+      y = y + rowH
     end
+
+    -- TYPING / NEARBY indicator pill --------------------------------------
     if me.nearby > 0 then
       local label = me.nearby..' driver'..(me.nearby>1 and 's' or '')..' nearby'
-      local tw = TW(label,12*s)+28*s
-      local tp = vec2(p.x+148*s,p.y+462*s)
-      ui.drawRectFilled(tp, tp+vec2(tw,24*s), rgbm(0.15,0.16,0.19,0.92), 8*s)
-      T(vec2(tp.x+14*s,tp.y+5*s), label, 12*s, C.soft)
+      local dots = string.rep('.', 1 + math.floor(now*2)%3)
+      label = label..' typing '..dots
+      local tw = TW(label,11*s)+30*s
+      local tp = vec2(p.x+(W-tw)/2, p.y+484*s)
+      ui.drawRectFilled(tp, tp+vec2(tw,24*s), rgbm(0.14,0.15,0.18,0.94), 12*s)
+      ui.drawRect(tp, tp+vec2(tw,24*s), C.edge, 12*s, 1)
+      T(vec2(tp.x+15*s,tp.y+5*s), label, 11*s, C.soft)
     end
-    local iy = p.y+494*s
-    ui.drawRectFilled(vec2(p.x+12*s,iy), vec2(p.x+458*s,iy+80*s), rgbm(0.10,0.11,0.13,0.9), 11*s)
-    ui.drawRect(vec2(p.x+12*s,iy), vec2(p.x+458*s,iy+80*s), C.edge, 11*s, 1)
-    ui.drawLine(vec2(p.x+12*s,iy+36*s), vec2(p.x+458*s,iy+36*s), C.edge, 1)
-    T(vec2(p.x+26*s,iy+10*s),'Send to',12*s,C.soft)
-    T(vec2(p.x+78*s,iy+10*s), 'All', 12*s, C.white, FONT_B)
+
+    -- INPUT BAR : rounded pill + text field + emoji / GIF / people ---------
+    local iy = p.y+516*s; local ih = 56*s
+    ui.drawRectFilled(vec2(p.x+12*s,iy), vec2(p.x+W-12*s,iy+ih), rgbm(0.09,0.10,0.12,0.92), 14*s)
+    ui.drawRect(vec2(p.x+12*s,iy), vec2(p.x+W-12*s,iy+ih), C.edge, 14*s, 1)
+    -- the three right-hand icons
+    iconSmiley(vec2(p.x+W-92*s, iy+ih/2), 9*s, C.muted)
+    ui.drawRectFilled(vec2(p.x+W-72*s,iy+ih/2-9*s), vec2(p.x+W-46*s,iy+ih/2+9*s), rgbm(1,1,1,0.06), 5*s)
+    TC(vec2(p.x+W-72*s,iy+ih/2-7*s),26*s,'GIF',9*s,C.soft,FONT_B)
+    iconPeople(vec2(p.x+W-30*s, iy+ih/2), 9*s, C.muted)
     -- real input field. ui.inputText returns text + an "entered" bool, but the
     -- ORDER varies between builds, so sort them out by type (never send a bool).
-    ui.setCursor(vec2(24, (iy-p.y)+44))
-    ui.pushItemWidth(360*s)
+    ui.setCursor(vec2(26, (iy-p.y)+18))
+    ui.pushItemWidth(330*s)
     local ok, r1, r2 = pcall(function() return ui.inputText('Message to All##drkzChat', chatDraft, ui.InputTextFlags.EnterReturnsTrue) end)
     ui.popItemWidth()
     if ok then
@@ -719,57 +822,76 @@ end
 local function drawSpeedo()
   if not S.showSpeedo then return end
   local car = ac.getCar and ac.getCar(0) or nil
-  local gear, rpm, rpmMax, kmh, fuel = 0, 0, 8000, 0, 0
+  local gear, rpm, rpmMax, kmh = 0, 0, 8000, 0
+  local absOn, tcOn, autoBox = false, false, false
   if car then
     gear=car.gear; rpm=car.rpm; rpmMax=(car.rpmLimiter and car.rpmLimiter>0) and car.rpmLimiter or 8000
-    kmh=car.speedKmh; fuel=car.fuel or 0
+    kmh=car.speedKmh
+    pcall(function() absOn    = (car.absMode or 0) > 0 end)
+    pcall(function() tcOn     = (car.tractionControlMode or 0) > 0 end)
+    pcall(function() autoBox  = car.autoShift == true end)
   end
   local gtxt = gear==-1 and 'R' or (gear==0 and 'N' or tostring(gear))
-  local f = math.clamp(rpm/rpmMax, 0, 1)
-  local col = shiftColor(f)
+  local f  = math.clamp(rpm/rpmMax, 0, 1)                 -- rpm fraction (pink arc)
+  local sf = math.clamp(kmh/280, 0, 1)                    -- speed fraction (purple arc)
+  local shiftCol = shiftColor(f)
 
-  -- single-pill layout matching the reference: gear ring on the left, shift
-  -- dots across the top, KMH + RPM side by side, fuel/est-lap bar underneath.
-  panel('spd', 'spd', 440, 150, function(p, s)
-    -- capsule background
-    plate(p, vec2(440*s, 150*s), 30*s)
+  -- TWIN-ARC pill (copied from the reference): pink gear arc on the left,
+  -- purple speed arc on the right, RPM + KM/H numbers in the middle, A/M/S
+  -- gearbox row and ABS / TC lights underneath, shift ticks across the top.
+  panel('spd', 'spd', 470, 150, function(p, s)
+    local W, H = 470*s, 150*s
+    plate(p, vec2(W, H), 30*s)                            -- rounded capsule
     -- crash flash: red border + wash for 0.5s after losing a life
     if now < speedoFlashEnd then
       local a = math.clamp((speedoFlashEnd - now) / 0.5, 0, 1)
-      ui.drawRectFilled(p, p + vec2(440*s,150*s), rgbm(0.9,0.05,0.05, 0.35*a), 30*s)
-      ui.drawRect(p, p + vec2(440*s,150*s), rgbm(1,0.15,0.15, a), 30*s, 4*s)
+      ui.drawRectFilled(p, p + vec2(W,H), rgbm(0.9,0.05,0.05, 0.35*a), 30*s)
+      ui.drawRect(p, p + vec2(W,H), rgbm(1,0.15,0.15, a), 30*s, 4*s)
     end
 
-    -- left: gear inside a colour-changing rpm ring
-    local lc = vec2(p.x+70*s, p.y+72*s)
-    local a0, span = math.rad(138), math.rad(264)
-    ui.pathClear(); ui.pathArcTo(lc, 46*s, a0, a0+span, 44); ui.pathStroke(rgbm(1,1,1,0.08), false, 8*s)
-    if f > 0.01 then ui.pathClear(); ui.pathArcTo(lc, 46*s, a0, a0+span*f, 44); ui.pathStroke(col, false, 8*s) end
-    TC(vec2(lc.x-34*s, lc.y-28*s), 68*s, gtxt, 46*s, C.white, FONT_X)
+    -- ---- LEFT pink arc + gear number ------------------------------------
+    local lc = vec2(p.x+80*s, p.y+72*s); local R = 48*s; local TH = 7*s
+    local la0, la1 = math.rad(55), math.rad(305)         -- C-shape, open to the right
+    ui.pathClear(); ui.pathArcTo(lc, R, la0, la1, 52); ui.pathStroke(rgbm(1,1,1,0.07), false, TH)
+    if f > 0.01 then gradArc(lc, R, la0, la0+(la1-la0)*f, C.arcPinkA, C.arcPinkB, TH) end
+    TC(vec2(lc.x-40*s, lc.y-30*s), 80*s, gtxt, 48*s, C.white, FONT_X)
 
-    -- top: shift-light dot row, fills with rpm, tinted by the shift colour
-    local dots = 16
+    -- ---- RIGHT purple arc -----------------------------------------------
+    local rc = vec2(p.x+W-80*s, p.y+72*s)
+    local ra0, ra1 = math.rad(235), math.rad(485)        -- mirror, open to the left
+    ui.pathClear(); ui.pathArcTo(rc, R, ra0, ra1, 52); ui.pathStroke(rgbm(1,1,1,0.07), false, TH)
+    if sf > 0.01 then gradArc(rc, R, ra0, ra0+(ra1-ra0)*sf, C.arcPurpA, C.arcPurpB, TH) end
+
+    -- ---- top shift ticks (green -> yellow -> red with rpm) ---------------
+    local dots, x0, x1 = 18, p.x+140*s, p.x+W-140*s
     local lit = math.floor(f * dots + 0.001)
     for i=0, dots-1 do
-      local dc = vec2(p.x+(150+i*16)*s, p.y+34*s)
-      ui.drawCircleFilled(dc, 4*s, i < lit and col or hex('3A3D46'), 12)
+      local dx = x0 + (x1-x0) * (i/(dots-1))
+      ui.drawCircleFilled(vec2(dx, p.y+24*s), 3*s, i < lit and shiftCol or hex('34373F'), 10)
     end
 
-    -- centre: KMH and RPM, labels then big numbers, left-aligned like the pic
-    T(vec2(p.x+150*s, p.y+62*s), 'KMH', 13*s, C.muted, FONT_B)
-    T(vec2(p.x+150*s, p.y+78*s), string.format('%.0f', kmh), 40*s, C.white, FONT_X)
-    T(vec2(p.x+300*s, p.y+62*s), 'RPM', 13*s, C.muted, FONT_B)
-    T(vec2(p.x+300*s, p.y+78*s), string.format('%.0f', rpm), 40*s, C.white, FONT_X)
+    -- ---- centre numbers : RPM (left) and KM/H (right) -------------------
+    T(vec2(p.x+150*s, p.y+52*s), 'RPM', 12*s, C.muted, FONT_B)
+    T(vec2(p.x+150*s, p.y+64*s), string.format('%.0f', rpm), 34*s, C.white, FONT_X)
+    TR(vec2(p.x, p.y+52*s), W-150*s, 'KM/H', 12*s, C.muted, FONT_B)
+    TR(vec2(p.x, p.y+64*s), W-150*s, string.format('%.0f', kmh), 34*s, C.white, FONT_X)
 
-    -- bottom: fuel + est-lap pill
-    local ap = vec2(p.x+142*s, p.y+124*s)
-    ui.drawRectFilled(ap, ap+vec2(286*s, 22*s), rgbm(1,1,1,0.05), 11*s)
-    ui.drawRect(ap, ap+vec2(286*s, 22*s), C.edge, 11*s, 1)
-    ui.drawCircleFilled(vec2(ap.x+16*s, ap.y+11*s), 4*s, C.muted, 12)
-    T(vec2(ap.x+28*s, ap.y+4*s), 'FUEL', 12*s, C.muted, FONT_B)
-    T(vec2(ap.x+66*s, ap.y+4*s), string.format('%.1fL', fuel), 12*s, C.white, FONT_B)
-    T(vec2(ap.x+150*s, ap.y+4*s), 'EST. LAP', 12*s, C.muted, FONT_B)
-    T(vec2(ap.x+218*s, ap.y+4*s), '-', 12*s, C.white, FONT_B)
+    -- ---- A / M / S gearbox row (highlight current mode) -----------------
+    local modes = { {'A', autoBox}, {'M', not autoBox}, {'S', false} }
+    local mx = p.x+152*s
+    for _,mm in ipairs(modes) do
+      T(vec2(mx, p.y+104*s), mm[1], 12*s, mm[2] and C.white or C.faint, FONT_B)
+      mx = mx + 22*s
+    end
+
+    -- ---- ABS / TC lights (centred, dot green when active) ---------------
+    local cy = p.y+126*s
+    local cxTC   = p.x+W/2 + 30*s
+    local cxABS  = p.x+W/2 - 60*s
+    T(vec2(cxABS, cy), 'ABS', 12*s, C.soft, FONT_B)
+    ui.drawCircleFilled(vec2(cxABS+34*s, cy+7*s), 4*s, absOn and C.hp or hex('34373F'), 12)
+    T(vec2(cxTC, cy), 'TC', 12*s, C.soft, FONT_B)
+    ui.drawCircleFilled(vec2(cxTC+26*s, cy+7*s), 4*s, tcOn and C.hp or hex('34373F'), 12)
   end)
 end
 
