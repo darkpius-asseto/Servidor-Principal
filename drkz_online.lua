@@ -98,7 +98,7 @@ local C = {
 local S = ac.storage{
   pPB='22,33', sPB=1.0, pPts='1240,40', sPts=1.0, pCrew='-4,206', sCrew=1.0,
   pChat='1440,205', sChat=1.0, pSpd='1520,860', sSpd=1.0, pStat='8,1040', sStat=1.0,
-  hudEnabled=true, showUI=true, showSpeedo=true, showChat=true, showCrew=true,
+  hudEnabled=true, showUI=true, showSpeedo=true, showChat=false, showCrew=false,
   bodyHex='#0B1D47', pbScore=0, rankPts=0,
 }
 local function unpack2(s) local x,y=s:match('(-?[%d%.]+),(-?[%d%.]+)'); return vec2(tonumber(x) or 0, tonumber(y) or 0) end
@@ -114,19 +114,31 @@ end
 ------------------------------------------------------------------------------
 
 local now = 0
-local me = { session=0, pb=S.pbScore, combo=1, comboT=0, speedMul=1, proxMul=1, nearby=0, kmh=0 }
+local me = { session=0, pb=S.pbScore, combo=1, comboT=0, speedMul=1, proxMul=1, nearby=0, kmh=0, lives=2 }
 local nearby, remote = {}, {}
 local chatLines, chatDraft, chatWhisper = {}, '', false
 
--- one-life state: one crash wipes the whole session score
-local busted, bustedAt, prevKmh = false, -10, 0
-local diagLogged = false      -- one-time nearby-car diagnostic log
+-- No Hesi UI 2.0 style scoring: points come from CUTS (near-misses), a combo
+-- multiplier that decays if you stop cutting, and a 2-lives crash system.
+local prevKmh          = 0
+local cutCooldowns     = {}    -- carIndex -> time until it can score another cut
+local crashCooldownEnd = 0     -- can't register another crash until this time
+local speedoFlashEnd   = 0     -- speedo flashes red until this time
+local vignetteStart, vignetteEnd = -10, -10   -- full-screen red flash timing
+local diagLogged = false
 
 local PROX_RANGE, PROX_CLOSE = 32, 8
-local MIN_CRUISE = 30          -- km/h: below this you earn nothing (no parked farming)
--- BASE_RATE is cranked way up so scores climb into the millions/billions like
--- a real traffic server. Multipliers stack on top (Combo x Speed x Prox).
-local BASE_RATE, COMBO_MAX, COMBO_GAIN, COMBO_DECAY = 9000, 12, 0.5, 2.5
+-- CUT scoring tuning
+local CUT_SPEED    = 80        -- min km/h to score a near-miss cut
+local CUT_DIST     = 3.0       -- metres: pass this close = a cut
+local CUT_POINTS   = 10000     -- base points per cut (x combo)
+local CUT_COOLDOWN = 2.0       -- seconds before the SAME car can score again
+local COMBO_STEP   = 0.5       -- combo gained per cut
+local COMBO_MAX    = 25        -- combo cap
+local COMBO_TIME   = 5.0       -- seconds a combo lasts after your last cut
+-- crash tuning
+local CRASH_DROP     = 40      -- km/h dropped in one frame = a crash
+local CRASH_COOLDOWN = 2.0     -- seconds of immunity after a crash
 
 -- abbreviate huge numbers: 1234 -> 1.23K, 1.2e6 -> 1.20M, 3.4e9 -> 3.40B
 local function shortNum(n)
@@ -233,31 +245,43 @@ end
 -- 5. SCORING
 ------------------------------------------------------------------------------
 
+-- register a single cut (near-miss): add points, grow combo, refresh timer
+local function registerCut()
+  me.combo = math.min(me.combo + COMBO_STEP, COMBO_MAX)
+  me.comboT = COMBO_TIME
+  me.session = me.session + CUT_POINTS * me.combo
+  if me.session > me.pb then me.pb = me.session; S.pbScore = math.floor(me.pb) end
+  S.rankPts = (S.rankPts or 0) + CUT_POINTS * me.combo * 0.01   -- licence bar progress
+end
+
 local function updateScoring(dt)
   local sim = ac.getSim and ac.getSim() or nil
   local my  = ac.getCar and ac.getCar(0) or nil
   if not sim or not my then return end
   me.kmh = my.speedKmh or 0
 
-  -- scan every car once. Score off ALL nearby traffic (AI + players), but only
-  -- list HUMAN players in the Nearby Drivers panel (AI traffic is hidden).
+  -- ---- scan cars: build the Nearby list AND detect CUTS (near-misses) --------
   nearby = {}
-  local gained, closest, humanCount, rawNear = 0, 1e9, 0, 0
+  local closest, humanCount, rawNear = 1e9, 0, 0
   local count = sim.carsCount or 0
   for i = 1, count - 1 do
     local c = ac.getCar(i)
     if c then
-      -- SAFE field read: an unknown struct member THROWS, so read via pcall.
       local function cf(name) local ok,v = pcall(function() return c[name] end); if ok then return v end end
       local pos = cf('position')
       local d = (my.position and pos) and my.position:distance(pos) or 1e9
-      -- ignore empty grid slots parked at the world origin
       local atOrigin = pos and math.abs(pos.x) < 1 and math.abs(pos.z) < 1
       if d < PROX_RANGE and d > 0.3 and not atOrigin then
         rawNear = rawNear + 1
-        gained = gained + (1 - d / PROX_RANGE)              -- score off ANY nearby car
         if d < closest then closest = d end
-        -- Nearby Drivers list: real HUMAN players only, AI traffic hidden
+
+        -- CUT: fast + very close + this car isn't on cooldown
+        if me.kmh > CUT_SPEED and d < CUT_DIST and (cutCooldowns[i] or 0) < now then
+          cutCooldowns[i] = now + CUT_COOLDOWN
+          registerCut()
+        end
+
+        -- Nearby Drivers list: real HUMAN players only, AI hidden
         local aiFlag = cf('isAIControlled') == true
         local rawOk, rawName = pcall(ac.getDriverName, i)
         rawName = (rawOk and rawName) or ''
@@ -269,10 +293,6 @@ local function updateScoring(dt)
           local rs = remote[key]
           nearby[#nearby+1] = { index=i, name=rawName, dist=d, score=rs and rs.score or nil, combo=rs and rs.combo or nil }
         end
-        if not diagLogged then
-          diagLogged = true
-          ac.log(string.format('[DRKZ] car %d: name="%s" ai=%s dist=%.1f', i, rawName, tostring(aiFlag), d))
-        end
       end
     end
   end
@@ -280,48 +300,44 @@ local function updateScoring(dt)
   me.nearby = humanCount
   me.rawNear = rawNear
 
-  -- must be CRUISING to score (no farming while parked)
-  if me.kmh < MIN_CRUISE then gained = 0 end
-  gained = gained * math.clamp(me.kmh / 60, 0, 4)   -- reward driving faster
-  me.gainRate = gained
+  -- ---- combo timer: decays if you stop cutting; empties -> combo resets ------
+  if me.comboT > 0 then
+    me.comboT = math.max(me.comboT - dt, 0)
+    if me.comboT <= 0 then me.combo = 1 end
+  end
 
+  -- display-only multipliers
   me.speedMul = 1 + math.clamp(me.kmh/50, 0, 20)
   me.proxMul  = 1 + (closest < 1e8 and (1 - math.clamp(closest/PROX_RANGE, 0, 1)) * 4 or 0)
                   + (closest < PROX_CLOSE and 2 or 0)
 
-  -- combo build/decay
-  if gained > 0 and me.kmh > 15 and not busted then me.comboT = math.min(me.comboT + dt, COMBO_MAX)
-  else me.comboT = math.max(me.comboT - dt*COMBO_DECAY, 0) end
-  me.combo = 1 + me.comboT*COMBO_GAIN
-
-  -- ONE LIFE: a crash wipes the whole session score. Two signals, either fires:
-  --   1) a sharp speed drop in one frame (impact, not braking)
-  --   2) CSP's collision depth spiking above a threshold
-  -- 3s cooldown so a single hit can't double-trigger. Tunable below.
+  -- ---- CRASH: sudden hard deceleration -> lose a life ------------------------
   local drop = prevKmh - me.kmh
-  local hardDrop = (prevKmh > 20 and drop > 12)
-  -- read the collision-depth signal (guarded; nil on builds without it)
+  me.lastDrop = drop
   local colDepth = 0
   pcall(function() colDepth = my.collisionDepth or 0 end)
-  me.colDepth = colDepth   -- shown in debug so we can tune the threshold
-  me.lastDrop = drop
-  local collided = colDepth > 0.01   -- any real contact (this worked before)
-  if (hardDrop or collided) and not busted and me.session > 0 and (now - bustedAt) > 3 then
-    busted, bustedAt = true, now
-    me.session, me.comboT, me.combo = 0, 0, 1
+  me.colDepth = colDepth
+  local crashed = (prevKmh > 50 and drop > CRASH_DROP) or colDepth > 0.02
+  if crashed and now > crashCooldownEnd then
+    crashCooldownEnd = now + CRASH_COOLDOWN
+    speedoFlashEnd   = now + 0.5           -- red speedo flash for 0.5s
+    if me.lives >= 2 then
+      -- first crash: lose a life, reset combo, KEEP the points
+      me.lives = 1
+      me.combo, me.comboT = 1, 0
+    else
+      -- final life: run ends
+      me.session = 0
+      me.combo, me.comboT = 1, 0
+      me.lives = 2
+      vignetteStart, vignetteEnd = now, now + 1.5   -- full-screen red flash
+    end
   end
-  if busted and now - bustedAt > 2.5 then busted = false end   -- clear the flash
   prevKmh = me.kmh
-
-  -- award points (huge). Only a bust stops scoring.
-  if gained > 0 and not busted then
-    me.session = me.session + gained * dt * BASE_RATE * me.combo * me.proxMul
-  end
-  if me.session > me.pb then me.pb = me.session; S.pbScore = math.floor(me.pb) end
-  S.rankPts = (S.rankPts or 0) + gained * dt * BASE_RATE * 0.02
 
   broadcastScore()
   for k,v in pairs(remote) do if now - v.t > 8 then remote[k] = nil end end
+  for k,t in pairs(cutCooldowns) do if t < now then cutCooldowns[k] = nil end end
 end
 
 local RANK_STEP = 5e6
@@ -473,7 +489,7 @@ local function drawPB()
     plate(p, vec2(330*s, h1), 12*s)
     T(vec2(p.x+16*s,p.y+9*s),'PB',13*s,C.white,FONT_B)
     T(vec2(p.x+16*s,p.y+25*s),'SOLO',9*s,C.muted)
-    T(vec2(p.x+52*s,p.y+11*s), shortNum(me.pb), 23*s, C.white, FONT_X)
+    T(vec2(p.x+52*s,p.y+11*s), comma(me.pb), 23*s, C.white, FONT_X)
     TR(vec2(p.x,p.y+16*s), 314*s, '#2,203', 13*s, C.muted)
     local y2 = p.y+h1+6*s; local h2 = 46*s
     plate(vec2(p.x,y2), vec2(330*s,h2), 12*s)
@@ -504,26 +520,26 @@ local function drawPoints()
     stat(8*s,92*s, string.format('%.1fX',me.combo),'Combo')
     stat(100*s,92*s, string.format('%.1fX',me.speedMul),'Speed',C.white)
     stat(192*s,92*s, string.format('%.1fX',me.proxMul),'Prox')
-    ui.drawRectFilled(vec2(p.x+292*s,p.y+8*s), vec2(p.x+382*s,p.y+48*s), C.grayBox, 9*s)
-    TC(vec2(p.x+292*s,p.y+17*s),90*s, string.format('%.1fX', me.combo*me.proxMul), 17*s, C.white, FONT_X)
+    -- top-right block: total multiplier + the 2 life dots
+    ui.drawRectFilled(vec2(p.x+292*s,p.y+8*s), vec2(p.x+382*s,p.y+40*s), C.grayBox, 9*s)
+    TC(vec2(p.x+292*s,p.y+13*s),90*s, string.format('%.1fX', me.combo), 16*s, C.white, FONT_X)
+    -- LIVES: two dots (filled = life remaining, dim = lost)
+    for i=0,1 do
+      local lc = vec2(p.x+(312+i*24)*s, p.y+48*s)
+      ui.drawCircleFilled(lc, 5*s, i < me.lives and C.hp or rgbm(0.30,0.10,0.10,0.9), 14)
+      ui.drawCircle(lc, 5*s, rgbm(1,1,1,0.15), 14, 1)
+    end
+
     local y2 = p.y+h1+8*s
     plate(vec2(p.x,y2), vec2(390*s,54*s), 12*s)
     local bx,by,bw,bh = p.x+7*s, y2+7*s, 376*s, 40*s
-    if busted then
-      -- red "BUSTED" flash instead of the points bar
-      ui.drawRectFilled(vec2(bx,by), vec2(bx+bw,by+bh), rgbm(0.55,0.05,0.05,0.95), 8*s)
-      TC(vec2(bx,by+9*s), bw, 'BUSTED  -  LOST IT ALL', 20*s, C.white, FONT_X)
-    else
-      -- white pill bar, then ONE clean purple fill inset a couple px inside it
-      -- so it fits perfectly with matching rounded ends (no double-colour overlap)
-      ui.drawRectFilled(vec2(bx,by), vec2(bx+bw,by+bh), C.barWhite, bh/2)
-      local ins = 3*s
-      local ih  = bh - ins*2
-      local fill = math.clamp(me.session/math.max(me.pb,1), 0.04, 1)
-      local fw = math.max((bw-ins*2)*fill, ih)   -- keep a full pill even when tiny
-      ui.drawRectFilled(vec2(bx+ins,by+ins), vec2(bx+ins+fw, by+ins+ih), C.purpB, ih/2)
-      TC(vec2(bx,by+10*s), bw, shortNum(me.session)..' PTS', 20*s, C.ink, FONT_X)
-    end
+    ui.drawRectFilled(vec2(bx,by), vec2(bx+bw,by+bh), C.barWhite, bh/2)
+    local ins = 3*s
+    local ih  = bh - ins*2
+    local fill = math.clamp(me.session/math.max(me.pb,1), 0.04, 1)
+    local fw = math.max((bw-ins*2)*fill, ih)   -- keep a full pill even when tiny
+    ui.drawRectFilled(vec2(bx+ins,by+ins), vec2(bx+ins+fw, by+ins+ih), C.purpB, ih/2)
+    TC(vec2(bx,by+10*s), bw, comma(me.session)..' PTS', 20*s, C.ink, FONT_X)
   end)
 end
 
@@ -548,7 +564,7 @@ local function drawNearby()
         ui.drawRectFilled(rp, rp+rsz, C.plateSub, 13*s); ui.drawRect(rp, rp+rsz, C.edge, 13*s, 1)
         local closeF = 1 - math.clamp(m.dist/PROX_RANGE,0,1)
         avatar(vec2(rp.x+37*s,ry+34*s), 24*s, rgbm(0.23+closeF*0.1, 0.55*closeF+0.2, 0.35, 1))
-        T(vec2(rp.x+70*s,ry+11*s), m.score and shortNum(m.score) or m.name, 20*s, C.white, FONT_X)
+        T(vec2(rp.x+70*s,ry+11*s), m.score and comma(m.score) or m.name, 20*s, C.white, FONT_X)
         T(vec2(rp.x+70*s,ry+40*s), m.name, 13*s, hex('9A9AA4'))
         local bx = rp.x+196*s
         ui.drawRectFilled(vec2(bx,ry+16*s), vec2(bx+44*s,ry+52*s), m.dist<PROX_CLOSE and rgbm(0.94,0.39,0.12,0.25) or rgbm(1,1,1,0.05), 10*s)
@@ -653,6 +669,12 @@ local function drawSpeedo()
   panel('spd', 'spd', 440, 150, function(p, s)
     -- capsule background
     plate(p, vec2(440*s, 150*s), 30*s)
+    -- crash flash: red border + wash for 0.5s after losing a life
+    if now < speedoFlashEnd then
+      local a = math.clamp((speedoFlashEnd - now) / 0.5, 0, 1)
+      ui.drawRectFilled(p, p + vec2(440*s,150*s), rgbm(0.9,0.05,0.05, 0.35*a), 30*s)
+      ui.drawRect(p, p + vec2(440*s,150*s), rgbm(1,0.15,0.15, a), 30*s, 4*s)
+    end
 
     -- left: gear inside a colour-changing rpm ring
     local lc = vec2(p.x+70*s, p.y+72*s)
@@ -761,38 +783,48 @@ local paintParts = { 'ALL BODY','DOORS','FRONT BUMPER','TRUNK','REAR BUMPER','HO
 -- you have to find the body meshes and override their material colour. Which
 -- material a car uses varies, so we try several common paint-material filters
 -- and tint whatever matches. Guarded, so unsupported cars just don't change.
+-- We TINT the material colour (ksDiffuse) only - we do NOT replace the texture,
+-- so the car keeps all its detail and just changes colour (that was the "whole
+-- texture" problem). Each tab targets a different mesh selection; unknown filter
+-- syntax is caught and the Body tab falls back to the exterior (minus glass).
+local paintFilters = {
+  Body     = '{ ! material:DAMAGE_GLASS & lod:A }',
+  Wheels   = 'WHEEL_?',
+  Interior = 'COCKPIT_HR',
+}
+local function findSel(carNode, filter)
+  local sel
+  pcall(function() sel = carNode:findMeshes(filter) end)
+  local n = 0
+  if sel then pcall(function() n = sel:size() end) end
+  return sel, (n or 0)
+end
 local paintOK, paintMeshes = nil, 0
 local _paintNamesLogged = false
 local function applyPaint()
   local c3 = rgb(paint.color.r, paint.color.g, paint.color.b)
-  local c4 = rgbm(paint.color.r, paint.color.g, paint.color.b, 1)
   local matched, cnt = false, 0
   pcall(function()
     local carNode = ac.findNodes and ac.findNodes('carRoot:0')
     if not carNode or not carNode.findMeshes then return end
-    -- `& lod:A` is REQUIRED or findMeshes matches nothing. Recolour the exterior
-    -- (all LOD-A meshes except glass).
-    local body = carNode:findMeshes('{ ! material:DAMAGE_GLASS & lod:A }')
-    if not body then return end
-    pcall(function() cnt = body:size() end)
-    -- Apply BOTH: a colour tint (ksDiffuse) AND a solid diffuse texture
-    -- (txDiffuse). Different car shaders respond to one or the other, so doing
-    -- both guarantees a visible change.
-    pcall(function() body:setMaterialProperty('ksDiffuse', c3) end)
-    pcall(function() body:setMaterialTexture('txDiffuse', c4) end)
-    matched = cnt > 0
-    -- log the first material names so we can target the paint precisely later
-    if not _paintNamesLogged then
-      _paintNamesLogged = true
-      pcall(function()
-        local names = {}
-        for i = 0, math.min(cnt, 10) - 1 do names[#names+1] = tostring(body:materialName(i)) end
-        ac.log('[DRKZ] car materials: ' .. table.concat(names, ', '))
-      end)
+    local sel, n = findSel(carNode, paintFilters[paint.tab] or paintFilters.Body)
+    -- fallback for Body if the filter matched nothing on an odd car
+    if n == 0 and paint.tab == 'Body' then sel, n = findSel(carNode, '{ lod:A }') end
+    cnt = n
+    if sel and n > 0 then
+      pcall(function() sel:setMaterialProperty('ksDiffuse', c3) end)
+      matched = true
+      if not _paintNamesLogged then
+        _paintNamesLogged = true
+        pcall(function()
+          local names = {}
+          for i = 0, math.min(n, 12) - 1 do names[#names+1] = tostring(sel:materialName(i)) end
+          ac.log('[DRKZ] '..paint.tab..' materials: ' .. table.concat(names, ', '))
+        end)
+      end
     end
   end)
   paintOK, paintMeshes = matched, cnt
-  ac.log(string.format('[DRKZ] paint applied=%s meshes=%d', tostring(matched), cnt))
   S.bodyHex = string.format('#%02X%02X%02X', math.floor(paint.color.r*255), math.floor(paint.color.g*255), math.floor(paint.color.b*255))
 end
 local function drawPaintEditor()
@@ -878,10 +910,33 @@ local function drawLeaderboard()
       local m = list[i]
       T(vec2(p.x+16,y), string.format('%d.',i), 13, C.muted)
       T(vec2(p.x+42,y), m.name, 13, m.mine and C.pink or C.white, m.mine and FONT_B or FONT_R)
-      TR(vec2(p.x,y),304, shortNum(m.score), 13, C.purple, FONT_B)
+      TR(vec2(p.x,y),304, comma(m.score), 13, C.purple, FONT_B)
       y = y+32
     end
     if #list==1 then TC(vec2(p.x,p.y+130),320,'Other DRKZ users appear here',11,C.faint) end
+  end)
+end
+
+------------------------------------------------------------------------------
+-- 14b. CRASH FULL-SCREEN FLASH  (final-life run-over vignette)
+------------------------------------------------------------------------------
+
+local function drawCrashFx()
+  if now >= vignetteEnd then return end
+  local sw = screenSize()
+  local a = math.clamp((vignetteEnd - now) / 1.5, 0, 1)   -- 1 -> 0 over 1.5s
+  ui.transparentWindow('drkz_vignette', vec2(0,0), sw, true, false, function()
+    -- full-screen red flash fading out
+    ui.drawRectFilled(vec2(0,0), sw, rgbm(0.85, 0.0, 0.0, 0.5*a), 0)
+    -- heavier red at the edges for a vignette feel
+    local edge = math.min(sw.x, sw.y) * 0.22
+    ui.drawRectFilled(vec2(0,0), vec2(sw.x, edge), rgbm(0.6,0,0,0.4*a), 0)
+    ui.drawRectFilled(vec2(0,sw.y-edge), sw, rgbm(0.6,0,0,0.4*a), 0)
+    ui.drawRectFilled(vec2(0,0), vec2(edge, sw.y), rgbm(0.6,0,0,0.4*a), 0)
+    ui.drawRectFilled(vec2(sw.x-edge,0), sw, rgbm(0.6,0,0,0.4*a), 0)
+    if a > 0.4 then
+      TC(vec2(0, sw.y*0.42), sw.x, 'RUN OVER', 56, rgbm(1,1,1, a), FONT_X)
+    end
   end)
 end
 
@@ -937,6 +992,7 @@ function script.drawUI()
       drawPB(); drawPoints(); drawNearby(); drawChat(); drawSpeedo(); drawStatus(); drawLeaderboard()
     end
     drawQuickActions(); drawPaintEditor()
+    drawCrashFx()          -- full-screen red flash, drawn on top of everything
   end)
 
   ui.popStyleVar(2)
