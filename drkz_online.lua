@@ -344,24 +344,32 @@ end
 -- 6. DRAW PRIMITIVES  (all window-local: 0,0 = window top-left)
 ------------------------------------------------------------------------------
 
--- All panels get noticeably rounder corners via the ROUND multiplier. Pass
--- glass=true for the extra-frosted look (stronger blur + more see-through fill).
-local ROUND = 1.7
+-- LIQUID GLASS panels: a real frosted blur of the scene behind, a translucent
+-- dark tint on top, a soft outer rim and a bright top-edge sheen so every panel
+-- reads like a pane of dark glass. Rounder corners via ROUND.
+local ROUND = 1.8
 local function plate(p, sz, r, fill, glass)
   r = (r or 12) * ROUND
   local blurred = false
   if canBlur then
     blurred = pcall(function()
-      ui.beginBlurring(); ui.drawRectFilled(p, p+sz, rgbm(1,1,1,1), r); ui.endBlurring(glass and 1.0 or 0.6)
+      ui.beginBlurring()
+      ui.drawRectFilled(p, p+sz, rgbm(1,1,1,1), r)
+      ui.endBlurring(1.0)               -- strong frost
     end)
   end
+  -- translucent dark tint (more see-through when the blur is available so the
+  -- frosted scene shows through = the liquid-glass feel)
   local f = fill
   if not f then
-    if glass then f = blurred and rgbm(0.055,0.06,0.08,0.66) or rgbm(0.055,0.06,0.08,0.86)
-    else f = C.plate end
+    if glass then f = blurred and rgbm(0.035,0.04,0.055,0.52) or rgbm(0.05,0.055,0.07,0.84)
+    else       f = blurred and rgbm(0.04,0.045,0.06,0.62)  or C.plate end
   end
   ui.drawRectFilled(p, p+sz, f, r)
-  ui.drawRect(p, p+sz, C.edge, r, 1)
+  -- soft outer rim
+  ui.drawRect(p, p+sz, rgbm(1,1,1,0.10), r, 1.5)
+  -- bright sheen along the very top edge (the glassy highlight)
+  ui.drawLine(vec2(p.x + r*0.55, p.y + 1.5), vec2(p.x + sz.x - r*0.55, p.y + 1.5), rgbm(1,1,1,0.13), 1)
 end
 local function gradientBar(p, sz, stops, r)
   r = r or 8; local n = 56
