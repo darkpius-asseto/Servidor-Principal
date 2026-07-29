@@ -434,8 +434,11 @@ local function plate(p, sz, r, fill, glass)
   -- with the frost only faintly showing through)
   local base = fill
   if not base then
-    if glass then base = rgbm(0.012,0.014,0.02, blurred and 0.60 or 0.54)
-    else          base = rgbm(0.015,0.017,0.024, blurred and 0.64 or 0.60) end
+    -- DARK, mostly-solid glass so bright scenery behind (tunnel walls, lights)
+    -- can't bleed through patchy. A hint of the frost still shows at these
+    -- alphas, but the panel reads as clean dark glass like the mock.
+    if glass then base = rgbm(0.02,0.022,0.03,  blurred and 0.82 or 0.80)
+    else          base = rgbm(0.022,0.025,0.034, blurred and 0.86 or 0.84) end
   end
   ui.drawRectFilled(p, p+sz, base, r)
 
@@ -494,6 +497,13 @@ local function glyph(kind, c, r, col)
   elseif kind=='car' then
     ui.drawRectFilled(vec2(c.x-r*0.8,c.y-r*0.15), vec2(c.x+r*0.8,c.y+r*0.3), col, 2)
     ui.drawRectFilled(vec2(c.x-r*0.45,c.y-r*0.5), vec2(c.x+r*0.45,c.y-r*0.1), col, 2)
+  elseif kind=='pad' then
+    -- game controller: rounded body, d-pad on the left, two buttons on the right
+    ui.drawRectFilled(vec2(c.x-r*0.95,c.y-r*0.42), vec2(c.x+r*0.95,c.y+r*0.5), col, r*0.42)
+    ui.drawRectFilled(vec2(c.x-r*0.62,c.y-r*0.06), vec2(c.x-r*0.28,c.y+r*0.06), C.greenBg, 1)  -- dpad h
+    ui.drawRectFilled(vec2(c.x-r*0.51,c.y-r*0.20), vec2(c.x-r*0.39,c.y+r*0.20), C.greenBg, 1)  -- dpad v
+    ui.drawCircleFilled(vec2(c.x+r*0.34,c.y),  r*0.12, C.greenBg, 8)                            -- button
+    ui.drawCircleFilled(vec2(c.x+r*0.62,c.y),  r*0.12, C.greenBg, 8)                            -- button
   elseif kind=='gear' then
     ui.drawCircle(c, r*0.62, col, 20, 2)
     for i=0,5 do local a=i*math.pi/3; ui.drawLine(vec2(c.x+math.cos(a)*r*0.62,c.y+math.sin(a)*r*0.62), vec2(c.x+math.cos(a)*r,c.y+math.sin(a)*r), col, 2) end
@@ -593,10 +603,13 @@ local function drawPB()
     local y2 = p.y+h1+6*s; local h2 = 46*s
     plate(vec2(p.x,y2), vec2(W,h2), 12*s)
     ui.drawRectFilled(vec2(p.x+7*s,y2+7*s), vec2(p.x+41*s,y2+39*s), C.greenBg, 8*s)
-    glyph('jacket', vec2(p.x+24*s,y2+23*s), 10*s, C.greenIco)
+    glyph('pad', vec2(p.x+24*s,y2+23*s), 11*s, C.greenIco)
     local bx, bw = p.x+50*s, 258*s
     ui.drawRectFilled(vec2(bx,y2+8*s), vec2(bx+bw,y2+38*s), C.slot, 8*s)
-    gradientBar(vec2(bx,y2+8*s), vec2(bw*math.max(into,0.06),30*s), {{0,C.greenA},{1,C.greenB}}, 8*s)
+    -- always keep enough green behind the label so dark text stays readable
+    local lblW = TW('Licenced '..lvl, 15*s) + 28*s
+    local fillW = math.clamp(math.max(bw*into, lblW), 0, bw)
+    gradientBar(vec2(bx,y2+8*s), vec2(fillW,30*s), {{0,C.greenA},{1,C.greenB}}, 8*s)
     T(vec2(bx+14*s,y2+15*s), 'Licenced '..lvl, 15*s, C.inkGreen, FONT_B)
     -- bright green vertical accent bar hugging the right edge (from the pic)
     gradientBar(vec2(p.x+W-20*s, y2+8*s), vec2(11*s, 30*s), {{0,C.greenA},{1,C.greenB}}, 5*s)
@@ -722,9 +735,9 @@ end
 
 local function drawChat()
   if not S.showChat then return end
-  panel('chat', 'chat', 470, 590, function(p, s)
+  panel('chat', 'chat', 470, 470, function(p, s)
     local W = 470*s
-    plate(p, vec2(W,590*s), 18*s)   -- same clean dark glass as the rest of the HUD
+    plate(p, vec2(W,470*s), 18*s)   -- same clean dark glass as the rest of the HUD
 
     -- HEADER : title + settings / minimize / close -------------------------
     T(vec2(p.x+18*s,p.y+15*s),'Chat',15*s,C.white,FONT_B)
@@ -748,7 +761,7 @@ local function drawChat()
     end
 
     -- MESSAGES : avatar + name + tier + timestamp + text -------------------
-    local top, bottom, rowH = p.y+50*s, p.y+484*s, 46*s
+    local top, bottom, rowH = p.y+50*s, p.y+356*s, 46*s
     local maxLines = math.max(1, math.floor((bottom-top)/rowH))
     local startIdx = math.max(1, #chatLines - maxLines + 1)
     local y = top
@@ -776,14 +789,14 @@ local function drawChat()
       local dots = string.rep('.', 1 + math.floor(now*2)%3)
       label = label..' typing '..dots
       local tw = TW(label,11*s)+30*s
-      local tp = vec2(p.x+(W-tw)/2, p.y+484*s)
+      local tp = vec2(p.x+(W-tw)/2, p.y+364*s)
       ui.drawRectFilled(tp, tp+vec2(tw,24*s), rgbm(0.14,0.15,0.18,0.94), 12*s)
       ui.drawRect(tp, tp+vec2(tw,24*s), C.edge, 12*s, 1)
       T(vec2(tp.x+15*s,tp.y+5*s), label, 11*s, C.soft)
     end
 
     -- INPUT BAR : rounded pill + text field + emoji / GIF / people ---------
-    local iy = p.y+516*s; local ih = 56*s
+    local iy = p.y+400*s; local ih = 56*s
     ui.drawRectFilled(vec2(p.x+12*s,iy), vec2(p.x+W-12*s,iy+ih), rgbm(0.09,0.10,0.12,0.92), 14*s)
     ui.drawRect(vec2(p.x+12*s,iy), vec2(p.x+W-12*s,iy+ih), C.edge, 14*s, 1)
     -- the three right-hand icons
