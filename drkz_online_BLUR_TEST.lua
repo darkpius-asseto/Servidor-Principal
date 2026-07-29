@@ -360,7 +360,8 @@ local function initGlass()
   glassTried = true
   pcall(function()
     glassRes = ss
-    local res = vec2(math.max(math.floor(ss.x/2),2), math.max(math.floor(ss.y/2),2))
+    -- quarter-res: much blurrier when stretched over the panel, and cheaper
+    local res = vec2(math.max(math.floor(ss.x/4),2), math.max(math.floor(ss.y/4),2))
     glassSrc = ui.ExtraCanvas(res)
     glassOut = ui.ExtraCanvas(res)
     glassOK  = glassSrc ~= nil and glassOut ~= nil
@@ -377,7 +378,10 @@ local function refreshGlass()
         shader = 'float4 main(PS_IN pin){ return float4(txPrevFrame.SampleLevel(samLinearSimple, pin.Tex, 0).rgb, 1); }'
       })
     end
-    glassOut:gaussianBlurFrom(glassSrc, 63)
+    -- three big-kernel passes = very heavy frost (ping-pong between the two)
+    glassOut:gaussianBlurFrom(glassSrc, 127)   -- scene -> out
+    glassSrc:gaussianBlurFrom(glassOut, 127)   -- out   -> src
+    glassOut:gaussianBlurFrom(glassSrc, 127)   -- src   -> out (final)
   end)
   if not ok then glassOK = false; ac.log('[DRKZ] glass capture failed - disabled') end
 end
@@ -411,11 +415,12 @@ local function plate(p, sz, r, fill, glass)
     end
   end
 
-  -- 3) glass tint - translucent over the (blurred) scene
+  -- 3) glass tint - NEAR-BLACK over the blurred scene (dark like the reference,
+  -- with the frost only faintly showing through)
   local base = fill
   if not base then
-    if glass then base = rgbm(0.04,0.05,0.07, blurred and 0.32 or 0.54)
-    else          base = rgbm(0.05,0.06,0.08, blurred and 0.38 or 0.60) end
+    if glass then base = rgbm(0.012,0.014,0.02, blurred and 0.60 or 0.54)
+    else          base = rgbm(0.015,0.017,0.024, blurred and 0.64 or 0.60) end
   end
   ui.drawRectFilled(p, p+sz, base, r)
 
